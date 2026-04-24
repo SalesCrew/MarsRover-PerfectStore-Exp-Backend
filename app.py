@@ -291,12 +291,15 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chain_options = ["Alle"] + chains_from_rows
     question_options = ["Alle"] + questions_from_rows
     gl_options = ["Alle"] + gl_from_rows
+    timeframe_options = ["Quartal", "Monat"]
     for idx, value in enumerate(chain_options):
         list_sheet.write(idx, 0, value)
     for idx, value in enumerate(question_options):
         list_sheet.write(idx, 1, value)
     for idx, value in enumerate(gl_options):
         list_sheet.write(idx, 2, value)
+    for idx, value in enumerate(timeframe_options):
+        list_sheet.write(idx, 3, value)
 
     dashboard = workbook.add_worksheet("Chart")
     dashboard.write("A1", "Fragebogen Distribution (Ja/Nein)", fmt_title)
@@ -304,19 +307,24 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     dashboard.write("A3", "Handelskette Filter:", fmt_label)
     dashboard.write("A4", "Frage Filter:", fmt_label)
     dashboard.write("A5", "GL Filter:", fmt_label)
+    dashboard.write("A6", "Zeitraum:", fmt_label)
     dashboard.write("B3", "Alle")
     dashboard.write("B4", "Alle")
     dashboard.write("B5", "Alle")
+    dashboard.write("B6", "Quartal")
     dashboard.data_validation("B3", {"validate": "list", "source": f"=Lists!$A$1:$A${len(chain_options)}"})
     dashboard.data_validation("B4", {"validate": "list", "source": f"=Lists!$B$1:$B${len(question_options)}"})
     dashboard.data_validation("B5", {"validate": "list", "source": f"=Lists!$C$1:$C${len(gl_options)}"})
-    dashboard.write("A7", "Tipp: Die Filter in B3/B4/B5 steuern die Linie.", fmt_note)
+    dashboard.data_validation("B6", {"validate": "list", "source": f"=Lists!$D$1:$D${len(timeframe_options)}"})
+    dashboard.write("A7", "Tipp: Die Filter in B3/B4/B5 und Zeitraum in B6 steuern die Linie.", fmt_note)
     dashboard.write("A8", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
     if selected_chains:
         dashboard.write("A9", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
 
     chart_data = workbook.add_worksheet("ChartData")
     chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
+    chart_data.write_row(0, 6, ["MonthKey", "Monat", "Ja", "Gesamt", "Distribution"], fmt_header)
+    chart_data.write_row(0, 12, ["Zeitraum", "Distribution"], fmt_header)
 
     quarters = unique_quarters(raw_rows)
     for row_index, (quarter_key, quarter_label) in enumerate(quarters, start=1):
@@ -345,23 +353,80 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         )
         chart_data.write_formula(row_index, 4, f'=IF(D{excel_row}=0,0,C{excel_row}/D{excel_row})', fmt_percent)
 
+    for row_index, (month_key, month_label) in enumerate(months, start=1):
+        excel_row = row_index + 1
+        chart_data.write(row_index, 6, month_key)
+        chart_data.write(row_index, 7, month_label)
+        chart_data.write_formula(
+            row_index,
+            8,
+            (
+                f'=SUMIFS(RawData!$H:$H,RawData!$A:$A,$G{excel_row},'
+                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
+            ),
+        )
+        chart_data.write_formula(
+            row_index,
+            9,
+            (
+                f'=COUNTIFS(RawData!$A:$A,$G{excel_row},'
+                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
+            ),
+        )
+        chart_data.write_formula(row_index, 10, f'=IF(J{excel_row}=0,0,I{excel_row}/J{excel_row})', fmt_percent)
+
+    quarter_last_row = max(len(quarters) + 1, 2)
+    month_last_row = max(len(months) + 1, 2)
+    max_periods = max(len(quarters), len(months))
+
+    for row_index in range(1, max_periods + 1):
+        excel_row = row_index + 1
+        chart_data.write_formula(
+            row_index,
+            12,
+            (
+                f'=IF(Chart!$B$6="Monat",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${month_last_row}),INDEX($H$2:$H${month_last_row},ROW()-1),""),'
+                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),""))'
+            ),
+        )
+        chart_data.write_formula(
+            row_index,
+            13,
+            (
+                f'=IF(Chart!$B$6="Monat",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${month_last_row}),INDEX($K$2:$K${month_last_row},ROW()-1),NA()),'
+                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA()))'
+            ),
+            fmt_percent,
+        )
+
     chart_data.set_column(0, 1, 12)
     chart_data.set_column(2, 3, 10)
     chart_data.set_column(4, 4, 14, fmt_percent)
+    chart_data.set_column(6, 7, 12)
+    chart_data.set_column(8, 9, 10)
+    chart_data.set_column(10, 10, 14, fmt_percent)
+    chart_data.set_column(12, 12, 14)
+    chart_data.set_column(13, 13, 14, fmt_percent)
 
-    if len(quarters) > 0:
+    if max_periods > 0:
         line_chart = workbook.add_chart({"type": "line"})
         line_chart.add_series(
             {
                 "name": "Distribution",
-                "categories": f"=ChartData!$B$2:$B${len(quarters) + 1}",
-                "values": f"=ChartData!$E$2:$E${len(quarters) + 1}",
+                "categories": f"=ChartData!$M$2:$M${max_periods + 1}",
+                "values": f"=ChartData!$N$2:$N${max_periods + 1}",
                 "line": {"color": "#2563EB", "width": 2.0},
                 "marker": {"type": "circle", "size": 6},
             }
         )
-        line_chart.set_title({"name": "Distribution pro Quartal"})
-        line_chart.set_x_axis({"name": "Quartal"})
+        line_chart.set_title({"name": "Distribution pro Zeitraum"})
+        line_chart.set_x_axis({"name": "Zeitraum"})
         line_chart.set_y_axis({"name": "Distribution", "num_format": "0%"})
         line_chart.set_legend({"none": True})
         dashboard.insert_chart("A10", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
