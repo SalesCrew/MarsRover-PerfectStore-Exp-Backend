@@ -18,6 +18,9 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 The `POST /distribution-export.xlsx` endpoint accepts the normalized export payload built in the main backend and returns raw `.xlsx` bytes.
 
+The generated workbook keeps monthly columns in `RawData` for detail analysis and uses a quarterly timeline in the `Chart` sheet.
+The GL filter is handled inside Excel (`Chart!B5`) and filters chart values per AD-Mitarbeiter directly from raw answer rows.
+
 ## Deployment
 
 - Deploy this folder as a separate Railway service.

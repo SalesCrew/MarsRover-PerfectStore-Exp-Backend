@@ -32,6 +32,64 @@ def unique_months(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
     return list(month_map.items())
 
 
+def parse_year_month(month_key: str) -> Tuple[int, int] | None:
+    parts = month_key.strip().split("-")
+    if len(parts) != 2:
+        return None
+    if not (parts[0].isdigit() and parts[1].isdigit()):
+        return None
+    year = int(parts[0])
+    month = int(parts[1])
+    if month < 1 or month > 12:
+        return None
+    return year, month
+
+
+def derive_quarter(month_key: str, month_label: str) -> Tuple[str, str]:
+    parsed = parse_year_month(month_key)
+    if parsed is not None:
+        year, month = parsed
+        quarter = ((month - 1) // 3) + 1
+        return f"{year}-Q{quarter}", f"Q{quarter} {year}"
+
+    fallback = month_label.strip()
+    if "." in fallback:
+        label_parts = fallback.split(".")
+        if len(label_parts) == 2 and label_parts[0].isdigit() and label_parts[1].isdigit():
+            month = int(label_parts[0])
+            year = int(label_parts[1])
+            if month >= 1 and month <= 12:
+                quarter = ((month - 1) // 3) + 1
+                return f"{year}-Q{quarter}", f"Q{quarter} {year}"
+
+    fallback_key = month_key.strip() or fallback or "unknown-quarter"
+    return fallback_key, fallback_key
+
+
+def quarter_sort_key(quarter_key: str) -> Tuple[int, int, str]:
+    cleaned = quarter_key.strip().replace(" ", "")
+    if "-Q" in cleaned:
+        parts = cleaned.split("-Q")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return int(parts[0]), int(parts[1]), cleaned
+    return 9999, 99, cleaned
+
+
+def unique_quarters(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    quarter_map: Dict[str, str] = {}
+    for row in rows:
+        quarter_key = str(row.get("quarterKey", "")).strip()
+        quarter_label = str(row.get("quarterLabel", "")).strip()
+        if not quarter_key:
+            month_key = str(row.get("monthKey", "")).strip()
+            month_label = str(row.get("monthLabel", "")).strip() or month_key
+            quarter_key, quarter_label = derive_quarter(month_key, month_label)
+        if quarter_key and quarter_key not in quarter_map:
+            quarter_map[quarter_key] = quarter_label or quarter_key
+
+    return sorted(quarter_map.items(), key=lambda item: quarter_sort_key(item[0]))
+
+
 def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     output = BytesIO()
     rows: List[Dict[str, Any]] = payload.get("rows", []) or []
@@ -65,6 +123,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_headers = [
         "MonthKey",
         "Monat",
+        "QuarterKey",
+        "Quartal",
         "Fragebogen",
         "FrageId",
         "Frage",
@@ -87,6 +147,13 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         ),
     )
 
+    for row in raw_rows:
+        month_key = str(row.get("monthKey", "")).strip()
+        month_label = str(row.get("monthLabel", "")).strip() or month_key
+        quarter_key, quarter_label = derive_quarter(month_key, month_label)
+        row["quarterKey"] = quarter_key
+        row["quarterLabel"] = quarter_label
+
     for idx, row in enumerate(raw_rows, start=1):
         raw_sheet.write_row(
             idx,
@@ -94,6 +161,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             [
                 str(row.get("monthKey", "")),
                 str(row.get("monthLabel", "")),
+                str(row.get("quarterKey", "")),
+                str(row.get("quarterLabel", "")),
                 str(row.get("fragebogenName", "")),
                 str(row.get("questionId", "")),
                 str(row.get("questionLabel", "")),
@@ -124,14 +193,16 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_sheet.freeze_panes(1, 0)
     raw_sheet.set_column(0, 0, 12)
     raw_sheet.set_column(1, 1, 11)
-    raw_sheet.set_column(2, 2, 28)
-    raw_sheet.set_column(3, 3, 36)
-    raw_sheet.set_column(4, 4, 45)
-    raw_sheet.set_column(5, 6, 10)
-    raw_sheet.set_column(7, 7, 28)
-    raw_sheet.set_column(8, 8, 20)
-    raw_sheet.set_column(9, 9, 24)
-    raw_sheet.set_column(10, 10, 40)
+    raw_sheet.set_column(2, 2, 12)
+    raw_sheet.set_column(3, 3, 11)
+    raw_sheet.set_column(4, 4, 28)
+    raw_sheet.set_column(5, 5, 36)
+    raw_sheet.set_column(6, 6, 45)
+    raw_sheet.set_column(7, 8, 10)
+    raw_sheet.set_column(9, 9, 28)
+    raw_sheet.set_column(10, 10, 20)
+    raw_sheet.set_column(11, 11, 24)
+    raw_sheet.set_column(12, 12, 40)
 
     months = unique_months(raw_rows)
     month_key_to_label = {key: label for key, label in months}
@@ -213,53 +284,63 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
 
     chains_from_rows = sorted({str(r.get("chain", "")).strip() for r in raw_rows if str(r.get("chain", "")).strip()})
     questions_from_rows = [question_label_by_id.get(qid, qid) for qid in question_order]
+    gl_from_rows = sorted({str(r.get("glName", "")).strip() for r in raw_rows if str(r.get("glName", "")).strip()})
 
     list_sheet = workbook.add_worksheet("Lists")
     list_sheet.hide()
     chain_options = ["Alle"] + chains_from_rows
     question_options = ["Alle"] + questions_from_rows
+    gl_options = ["Alle"] + gl_from_rows
     for idx, value in enumerate(chain_options):
         list_sheet.write(idx, 0, value)
     for idx, value in enumerate(question_options):
         list_sheet.write(idx, 1, value)
+    for idx, value in enumerate(gl_options):
+        list_sheet.write(idx, 2, value)
 
     dashboard = workbook.add_worksheet("Chart")
     dashboard.write("A1", "Fragebogen Distribution (Ja/Nein)", fmt_title)
     dashboard.write("A2", "Frageboegen: " + ", ".join([str(fb.get("name", "")) for fb in fragebogen_list if fb.get("name")]))
     dashboard.write("A3", "Handelskette Filter:", fmt_label)
     dashboard.write("A4", "Frage Filter:", fmt_label)
+    dashboard.write("A5", "GL Filter:", fmt_label)
     dashboard.write("B3", "Alle")
     dashboard.write("B4", "Alle")
+    dashboard.write("B5", "Alle")
     dashboard.data_validation("B3", {"validate": "list", "source": f"=Lists!$A$1:$A${len(chain_options)}"})
     dashboard.data_validation("B4", {"validate": "list", "source": f"=Lists!$B$1:$B${len(question_options)}"})
-    dashboard.write("A6", "Tipp: Die Filter in B3/B4 steuern die Linie.", fmt_note)
-    dashboard.write("A7", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
+    dashboard.data_validation("B5", {"validate": "list", "source": f"=Lists!$C$1:$C${len(gl_options)}"})
+    dashboard.write("A7", "Tipp: Die Filter in B3/B4/B5 steuern die Linie.", fmt_note)
+    dashboard.write("A8", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
     if selected_chains:
-        dashboard.write("A8", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
+        dashboard.write("A9", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
 
     chart_data = workbook.add_worksheet("ChartData")
-    chart_data.write_row(0, 0, ["MonthKey", "Monat", "Ja", "Gesamt", "Distribution"], fmt_header)
+    chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
 
-    for row_index, (month_key, month_label) in enumerate(months, start=1):
+    quarters = unique_quarters(raw_rows)
+    for row_index, (quarter_key, quarter_label) in enumerate(quarters, start=1):
         excel_row = row_index + 1
-        chart_data.write(row_index, 0, month_key)
-        chart_data.write(row_index, 1, month_label)
+        chart_data.write(row_index, 0, quarter_key)
+        chart_data.write(row_index, 1, quarter_label)
         chart_data.write_formula(
             row_index,
             2,
             (
-                f'=SUMIFS(RawData!$F:$F,RawData!$A:$A,$A{excel_row},'
-                f'RawData!$I:$I,IF(Chart!$B$3="Alle","<>",Chart!$B$3),'
-                f'RawData!$E:$E,IF(Chart!$B$4="Alle","<>",Chart!$B$4))'
+                f'=SUMIFS(RawData!$H:$H,RawData!$C:$C,$A{excel_row},'
+                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
             ),
         )
         chart_data.write_formula(
             row_index,
             3,
             (
-                f'=COUNTIFS(RawData!$A:$A,$A{excel_row},'
-                f'RawData!$I:$I,IF(Chart!$B$3="Alle","<>",Chart!$B$3),'
-                f'RawData!$E:$E,IF(Chart!$B$4="Alle","<>",Chart!$B$4))'
+                f'=COUNTIFS(RawData!$C:$C,$A{excel_row},'
+                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
             ),
         )
         chart_data.write_formula(row_index, 4, f'=IF(D{excel_row}=0,0,C{excel_row}/D{excel_row})', fmt_percent)
@@ -268,19 +349,19 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chart_data.set_column(2, 3, 10)
     chart_data.set_column(4, 4, 14, fmt_percent)
 
-    if len(months) > 0:
+    if len(quarters) > 0:
         line_chart = workbook.add_chart({"type": "line"})
         line_chart.add_series(
             {
                 "name": "Distribution",
-                "categories": f"=ChartData!$B$2:$B${len(months) + 1}",
-                "values": f"=ChartData!$E$2:$E${len(months) + 1}",
+                "categories": f"=ChartData!$B$2:$B${len(quarters) + 1}",
+                "values": f"=ChartData!$E$2:$E${len(quarters) + 1}",
                 "line": {"color": "#2563EB", "width": 2.0},
                 "marker": {"type": "circle", "size": 6},
             }
         )
-        line_chart.set_title({"name": "Distribution pro Monat"})
-        line_chart.set_x_axis({"name": "Monat"})
+        line_chart.set_title({"name": "Distribution pro Quartal"})
+        line_chart.set_x_axis({"name": "Quartal"})
         line_chart.set_y_axis({"name": "Distribution", "num_format": "0%"})
         line_chart.set_legend({"none": True})
         dashboard.insert_chart("A10", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
