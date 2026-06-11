@@ -2,6 +2,7 @@ from io import BytesIO
 from typing import Any, Dict, List, Tuple
 from collections import OrderedDict, defaultdict
 import logging
+import sys
 import time
 
 from fastapi import FastAPI, HTTPException, Request
@@ -11,7 +12,11 @@ import xlsxwriter
 
 
 app = FastAPI(title="Perfectstore Export Backend", version="1.0.0")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    stream=sys.stdout,
+)
 logger = logging.getLogger("perfectstore-export")
 
 
