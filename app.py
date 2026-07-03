@@ -136,6 +136,27 @@ def unique_quarters(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
     return sorted(quarter_map.items(), key=lambda item: quarter_sort_key(item[0]))
 
 
+def week_sort_key(week_key: str) -> Tuple[int, int, str]:
+    cleaned = week_key.strip().replace(" ", "")
+    if "-W" in cleaned:
+        parts = cleaned.split("-W")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return int(parts[0]), int(parts[1]), cleaned
+    return 9999, 99, cleaned
+
+
+def unique_weeks(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    week_map: Dict[str, str] = {}
+    for row in rows:
+        week_key = str(row.get("weekKey", "")).strip()
+        if not week_key:
+            continue
+        week_label = str(row.get("weekLabel", "")).strip() or week_key
+        if week_key not in week_map:
+            week_map[week_key] = week_label
+    return sorted(week_map.items(), key=lambda item: week_sort_key(item[0]))
+
+
 def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     output = BytesIO()
     rows: List[Dict[str, Any]] = payload.get("rows", []) or []
@@ -184,6 +205,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         "Distributionsziel",
         "Qualitätsziel",
         "ZielMatch",
+        "WeekKey",
+        "KW",
     ]
     raw_sheet.write_row(0, 0, raw_headers, fmt_header)
 
@@ -224,6 +247,9 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 str(row.get("responseId", "")),
                 1 if bool(row.get("distributionsziel", False)) else 0,
                 1 if bool(row.get("qualitaetsziel", False)) else 0,
+                "",
+                str(row.get("weekKey", "")),
+                str(row.get("weekLabel", "")),
             ],
         )
         excel_row = idx + 1
@@ -265,7 +291,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_sheet.set_column(10, 10, 20)
     raw_sheet.set_column(11, 11, 24)
     raw_sheet.set_column(12, 12, 40)
-    raw_sheet.set_column(13, 15, 18)
+    raw_sheet.set_column(13, 17, 18)
 
     months = unique_months(raw_rows)
     month_key_to_label = {key: label for key, label in months}
@@ -354,7 +380,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chain_options = ["Alle"] + chains_from_rows
     question_options = ["Alle"] + questions_from_rows
     gl_options = ["Alle"] + gl_from_rows
-    timeframe_options = ["Quartal", "Monat"]
+    timeframe_options = ["Quartal", "KW"]
     target_options = ["Alle", "Distributionsziel", "Qualitätsziel"]
     for idx, value in enumerate(chain_options):
         list_sheet.write(idx, 0, value)
@@ -392,7 +418,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
 
     chart_data = workbook.add_worksheet("ChartData")
     chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
-    chart_data.write_row(0, 6, ["MonthKey", "Monat", "Ja", "Gesamt", "Distribution"], fmt_header)
+    chart_data.write_row(0, 6, ["WeekKey", "KW", "Ja", "Gesamt", "Distribution"], fmt_header)
     chart_data.write_row(0, 12, ["Zeitraum", "Distribution"], fmt_header)
 
     quarters = unique_quarters(raw_rows)
@@ -424,15 +450,16 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         )
         chart_data.write_formula(row_index, 4, f'=IF(D{excel_row}=0,0,C{excel_row}/D{excel_row})', fmt_percent)
 
-    for row_index, (month_key, month_label) in enumerate(months, start=1):
+    weeks = unique_weeks(raw_rows)
+    for row_index, (week_key, week_label) in enumerate(weeks, start=1):
         excel_row = row_index + 1
-        chart_data.write(row_index, 6, month_key)
-        chart_data.write(row_index, 7, month_label)
+        chart_data.write(row_index, 6, week_key)
+        chart_data.write(row_index, 7, week_label)
         chart_data.write_formula(
             row_index,
             8,
             (
-                f'=SUMIFS(RawData!$H:$H,RawData!$A:$A,$G{excel_row},'
+                f'=SUMIFS(RawData!$H:$H,RawData!$Q:$Q,$G{excel_row},'
                 f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
                 f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
@@ -443,7 +470,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             row_index,
             9,
             (
-                f'=COUNTIFS(RawData!$A:$A,$G{excel_row},'
+                f'=COUNTIFS(RawData!$Q:$Q,$G{excel_row},'
                 f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
                 f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
@@ -453,8 +480,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         chart_data.write_formula(row_index, 10, f'=IF(J{excel_row}=0,0,I{excel_row}/J{excel_row})', fmt_percent)
 
     quarter_last_row = max(len(quarters) + 1, 2)
-    month_last_row = max(len(months) + 1, 2)
-    max_periods = max(len(quarters), len(months))
+    week_last_row = max(len(weeks) + 1, 2)
+    max_periods = max(len(quarters), len(weeks))
 
     for row_index in range(1, max_periods + 1):
         excel_row = row_index + 1
@@ -462,8 +489,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             row_index,
             12,
             (
-                f'=IF(Chart!$B$7="Monat",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${month_last_row}),INDEX($H$2:$H${month_last_row},ROW()-1),""),'
+                f'=IF(Chart!$B$7="KW",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($H$2:$H${week_last_row},ROW()-1),""),'
                 f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),""))'
             ),
         )
@@ -471,8 +498,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             row_index,
             13,
             (
-                f'=IF(Chart!$B$7="Monat",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${month_last_row}),INDEX($K$2:$K${month_last_row},ROW()-1),NA()),'
+                f'=IF(Chart!$B$7="KW",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
                 f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA()))'
             ),
             fmt_percent,
