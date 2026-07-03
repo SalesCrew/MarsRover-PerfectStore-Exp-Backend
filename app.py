@@ -199,6 +199,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         "JaFlag",
         "Antwort",
         "Kunde",
+        "Interne Markt ID",
         "Handelskette",
         "AD-Mitarbeiter",
         "ResponseId",
@@ -217,6 +218,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             str(item.get("chain", "")),
             str(item.get("questionLabel", "")),
             str(item.get("marketName", "")),
+            str(item.get("marketInternalId", "")),
         ),
     )
 
@@ -242,6 +244,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 1 if bool(row.get("answerBoolean", False)) else 0,
                 "Ja" if bool(row.get("answerBoolean", False)) else "Nein",
                 str(row.get("marketName", "")),
+                str(row.get("marketInternalId", "")),
                 str(row.get("chain", "")),
                 str(row.get("glName", "")),
                 str(row.get("responseId", "")),
@@ -255,11 +258,11 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         excel_row = idx + 1
         raw_sheet.write_formula(
             idx,
-            15,
+            16,
             (
                 f'=IF(Chart!$B$6="Alle",1,'
-                f'IF(Chart!$B$6="Distributionsziel",N{excel_row},'
-                f'IF(Chart!$B$6="Qualitätsziel",O{excel_row},0)))'
+                f'IF(Chart!$B$6="Distributionsziel",O{excel_row},'
+                f'IF(Chart!$B$6="Qualitätsziel",P{excel_row},0)))'
             ),
         )
 
@@ -288,16 +291,17 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_sheet.set_column(6, 6, 45)
     raw_sheet.set_column(7, 8, 10)
     raw_sheet.set_column(9, 9, 28)
-    raw_sheet.set_column(10, 10, 20)
-    raw_sheet.set_column(11, 11, 24)
-    raw_sheet.set_column(12, 12, 40)
-    raw_sheet.set_column(13, 17, 18)
+    raw_sheet.set_column(10, 10, 18)
+    raw_sheet.set_column(11, 11, 20)
+    raw_sheet.set_column(12, 12, 24)
+    raw_sheet.set_column(13, 13, 40)
+    raw_sheet.set_column(14, 18, 18)
 
     months = unique_months(raw_rows)
     month_key_to_label = {key: label for key, label in months}
 
     item_month_agg: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
-    customer_agg: Dict[Tuple[str, str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
+    customer_agg: Dict[Tuple[str, str, str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
     ad_agg: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
 
     for row in raw_rows:
@@ -305,6 +309,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         qid = str(row.get("questionId", ""))
         chain = str(row.get("chain", ""))
         market_name = str(row.get("marketName", ""))
+        market_internal_id = str(row.get("marketInternalId", ""))
         gl_name = str(row.get("glName", ""))
         yes_flag = 1 if bool(row.get("answerBoolean", False)) else 0
 
@@ -312,7 +317,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         item_month_agg[item_key]["total"] += 1
         item_month_agg[item_key]["yes"] += yes_flag
 
-        customer_key = (month_key, chain, market_name)
+        customer_key = (month_key, chain, market_internal_id, market_name)
         customer_agg[customer_key]["total"] += 1
         customer_agg[customer_key]["yes"] += yes_flag
 
@@ -342,19 +347,21 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     item_sheet.set_column(1, max(1, len(item_headers) - 1), 24, fmt_percent)
 
     customer_sheet = workbook.add_worksheet("CustomerDistribution_Monthly")
-    customer_sheet.write_row(0, 0, ["Monat", "Handelskette", "Kunde", "Ja", "Gesamt", "Distribution"], fmt_header)
+    customer_sheet.write_row(0, 0, ["Monat", "Handelskette", "Interne Markt ID", "Kunde", "Ja", "Gesamt", "Distribution"], fmt_header)
     for row_index, (key, agg) in enumerate(sorted(customer_agg.items()), start=1):
-        month_key, chain, market_name = key
+        month_key, chain, market_internal_id, market_name = key
         total = agg["total"]
         yes = agg["yes"]
         customer_sheet.write_row(
             row_index,
             0,
-            [month_key_to_label.get(month_key, month_key), chain, market_name, yes, total, (yes / total) if total > 0 else 0],
+            [month_key_to_label.get(month_key, month_key), chain, market_internal_id, market_name, yes, total, (yes / total) if total > 0 else 0],
         )
-    customer_sheet.set_column(0, 2, 22)
-    customer_sheet.set_column(3, 4, 10)
-    customer_sheet.set_column(5, 5, 14, fmt_percent)
+    customer_sheet.set_column(0, 1, 22)
+    customer_sheet.set_column(2, 2, 18)
+    customer_sheet.set_column(3, 3, 28)
+    customer_sheet.set_column(4, 5, 10)
+    customer_sheet.set_column(6, 6, 14, fmt_percent)
 
     ad_sheet = workbook.add_worksheet("ADDistribution_Monthly")
     ad_sheet.write_row(0, 0, ["Monat", "AD-Mitarbeiter", "Ja", "Gesamt", "Distribution"], fmt_header)
@@ -431,10 +438,10 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             2,
             (
                 f'=SUMIFS(RawData!$H:$H,RawData!$C:$C,$A{excel_row},'
-                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
-                f'RawData!$P:$P,1)'
+                f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$Q:$Q,1)'
             ),
         )
         chart_data.write_formula(
@@ -442,10 +449,10 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             3,
             (
                 f'=COUNTIFS(RawData!$C:$C,$A{excel_row},'
-                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
-                f'RawData!$P:$P,1)'
+                f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$Q:$Q,1)'
             ),
         )
         chart_data.write_formula(row_index, 4, f'=IF(D{excel_row}=0,0,C{excel_row}/D{excel_row})', fmt_percent)
@@ -459,22 +466,22 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             row_index,
             8,
             (
-                f'=SUMIFS(RawData!$H:$H,RawData!$Q:$Q,$G{excel_row},'
-                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'=SUMIFS(RawData!$H:$H,RawData!$R:$R,$G{excel_row},'
+                f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
-                f'RawData!$P:$P,1)'
+                f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$Q:$Q,1)'
             ),
         )
         chart_data.write_formula(
             row_index,
             9,
             (
-                f'=COUNTIFS(RawData!$Q:$Q,$G{excel_row},'
-                f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'=COUNTIFS(RawData!$R:$R,$G{excel_row},'
+                f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
-                f'RawData!$P:$P,1)'
+                f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$Q:$Q,1)'
             ),
         )
         chart_data.write_formula(row_index, 10, f'=IF(J{excel_row}=0,0,I{excel_row}/J{excel_row})', fmt_percent)
