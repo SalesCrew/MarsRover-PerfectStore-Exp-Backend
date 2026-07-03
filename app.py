@@ -52,7 +52,8 @@ class ExportPayload(BaseModel):
     fragebogen: List[Dict[str, str]] = Field(default_factory=list)
     selectedChains: List[str] = Field(default_factory=list)
     selectedQuestionIds: List[str] = Field(default_factory=list)
-    selectedQuestions: List[Dict[str, str]] = Field(default_factory=list)
+    selectedQuestions: List[Dict[str, Any]] = Field(default_factory=list)
+    selectedTargetFilter: str | None = None
     rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -66,6 +67,15 @@ def unique_months(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
         if month_key not in month_map:
             month_map[month_key] = month_label
     return list(month_map.items())
+
+
+def target_filter_label(value: Any) -> str:
+    normalized = str(value or "all").strip().lower()
+    if normalized == "distribution":
+        return "Distributionsziel"
+    if normalized == "quality":
+        return "Qualitätsziel"
+    return "Alle"
 
 
 def parse_year_month(month_key: str) -> Tuple[int, int] | None:
@@ -129,9 +139,10 @@ def unique_quarters(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
 def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     output = BytesIO()
     rows: List[Dict[str, Any]] = payload.get("rows", []) or []
-    selected_questions: List[Dict[str, str]] = payload.get("selectedQuestions", []) or []
+    selected_questions: List[Dict[str, Any]] = payload.get("selectedQuestions", []) or []
     fragebogen_list: List[Dict[str, str]] = payload.get("fragebogen", []) or []
     selected_chains: List[str] = payload.get("selectedChains", []) or []
+    selected_target_filter = target_filter_label(payload.get("selectedTargetFilter"))
 
     question_label_by_id: Dict[str, str] = {
         str(q.get("id", "")): str(q.get("label", "") or q.get("id", ""))
@@ -170,6 +181,9 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         "Handelskette",
         "AD-Mitarbeiter",
         "ResponseId",
+        "Distributionsziel",
+        "Qualitätsziel",
+        "ZielMatch",
     ]
     raw_sheet.write_row(0, 0, raw_headers, fmt_header)
 
@@ -208,7 +222,19 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 str(row.get("chain", "")),
                 str(row.get("glName", "")),
                 str(row.get("responseId", "")),
+                1 if bool(row.get("distributionsziel", False)) else 0,
+                1 if bool(row.get("qualitaetsziel", False)) else 0,
             ],
+        )
+        excel_row = idx + 1
+        raw_sheet.write_formula(
+            idx,
+            15,
+            (
+                f'=IF(Chart!$B$6="Alle",1,'
+                f'IF(Chart!$B$6="Distributionsziel",N{excel_row},'
+                f'IF(Chart!$B$6="Qualitätsziel",O{excel_row},0)))'
+            ),
         )
 
     if raw_rows:
@@ -239,6 +265,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_sheet.set_column(10, 10, 20)
     raw_sheet.set_column(11, 11, 24)
     raw_sheet.set_column(12, 12, 40)
+    raw_sheet.set_column(13, 15, 18)
 
     months = unique_months(raw_rows)
     month_key_to_label = {key: label for key, label in months}
@@ -328,6 +355,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     question_options = ["Alle"] + questions_from_rows
     gl_options = ["Alle"] + gl_from_rows
     timeframe_options = ["Quartal", "Monat"]
+    target_options = ["Alle", "Distributionsziel", "Qualitätsziel"]
     for idx, value in enumerate(chain_options):
         list_sheet.write(idx, 0, value)
     for idx, value in enumerate(question_options):
@@ -336,6 +364,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         list_sheet.write(idx, 2, value)
     for idx, value in enumerate(timeframe_options):
         list_sheet.write(idx, 3, value)
+    for idx, value in enumerate(target_options):
+        list_sheet.write(idx, 4, value)
 
     dashboard = workbook.add_worksheet("Chart")
     dashboard.write("A1", "Fragebogen Distribution (Ja/Nein)", fmt_title)
@@ -343,19 +373,22 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     dashboard.write("A3", "Handelskette Filter:", fmt_label)
     dashboard.write("A4", "Frage Filter:", fmt_label)
     dashboard.write("A5", "GL Filter:", fmt_label)
-    dashboard.write("A6", "Zeitraum:", fmt_label)
+    dashboard.write("A6", "Ziel Filter:", fmt_label)
+    dashboard.write("A7", "Zeitraum:", fmt_label)
     dashboard.write("B3", "Alle")
     dashboard.write("B4", "Alle")
     dashboard.write("B5", "Alle")
-    dashboard.write("B6", "Quartal")
+    dashboard.write("B6", selected_target_filter)
+    dashboard.write("B7", "Quartal")
     dashboard.data_validation("B3", {"validate": "list", "source": f"=Lists!$A$1:$A${len(chain_options)}"})
     dashboard.data_validation("B4", {"validate": "list", "source": f"=Lists!$B$1:$B${len(question_options)}"})
     dashboard.data_validation("B5", {"validate": "list", "source": f"=Lists!$C$1:$C${len(gl_options)}"})
-    dashboard.data_validation("B6", {"validate": "list", "source": f"=Lists!$D$1:$D${len(timeframe_options)}"})
-    dashboard.write("A7", "Tipp: Die Filter in B3/B4/B5 und Zeitraum in B6 steuern die Linie.", fmt_note)
-    dashboard.write("A8", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
+    dashboard.data_validation("B6", {"validate": "list", "source": f"=Lists!$E$1:$E${len(target_options)}"})
+    dashboard.data_validation("B7", {"validate": "list", "source": f"=Lists!$D$1:$D${len(timeframe_options)}"})
+    dashboard.write("A8", "Tipp: Die Filter in B3/B4/B5/B6 und Zeitraum in B7 steuern die Linie.", fmt_note)
+    dashboard.write("A9", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
     if selected_chains:
-        dashboard.write("A9", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
+        dashboard.write("A10", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
 
     chart_data = workbook.add_worksheet("ChartData")
     chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
@@ -374,7 +407,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 f'=SUMIFS(RawData!$H:$H,RawData!$C:$C,$A{excel_row},'
                 f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$P:$P,1)'
             ),
         )
         chart_data.write_formula(
@@ -384,7 +418,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 f'=COUNTIFS(RawData!$C:$C,$A{excel_row},'
                 f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$P:$P,1)'
             ),
         )
         chart_data.write_formula(row_index, 4, f'=IF(D{excel_row}=0,0,C{excel_row}/D{excel_row})', fmt_percent)
@@ -400,7 +435,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 f'=SUMIFS(RawData!$H:$H,RawData!$A:$A,$G{excel_row},'
                 f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$P:$P,1)'
             ),
         )
         chart_data.write_formula(
@@ -410,7 +446,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 f'=COUNTIFS(RawData!$A:$A,$G{excel_row},'
                 f'RawData!$K:$K,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
                 f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5))'
+                f'RawData!$L:$L,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$P:$P,1)'
             ),
         )
         chart_data.write_formula(row_index, 10, f'=IF(J{excel_row}=0,0,I{excel_row}/J{excel_row})', fmt_percent)
@@ -425,7 +462,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             row_index,
             12,
             (
-                f'=IF(Chart!$B$6="Monat",'
+                f'=IF(Chart!$B$7="Monat",'
                 f'IF(ROW()-1<=COUNTA($G$2:$G${month_last_row}),INDEX($H$2:$H${month_last_row},ROW()-1),""),'
                 f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),""))'
             ),
@@ -434,7 +471,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             row_index,
             13,
             (
-                f'=IF(Chart!$B$6="Monat",'
+                f'=IF(Chart!$B$7="Monat",'
                 f'IF(ROW()-1<=COUNTA($G$2:$G${month_last_row}),INDEX($K$2:$K${month_last_row},ROW()-1),NA()),'
                 f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA()))'
             ),
@@ -465,7 +502,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         line_chart.set_x_axis({"name": "Zeitraum"})
         line_chart.set_y_axis({"name": "Distribution", "num_format": "0%"})
         line_chart.set_legend({"none": True})
-        dashboard.insert_chart("A10", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
+        dashboard.insert_chart("A12", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
 
     workbook.close()
     output.seek(0)
