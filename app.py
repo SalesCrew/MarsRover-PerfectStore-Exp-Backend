@@ -54,6 +54,7 @@ class ExportPayload(BaseModel):
     selectedQuestionIds: List[str] = Field(default_factory=list)
     selectedQuestions: List[Dict[str, Any]] = Field(default_factory=list)
     selectedTargetFilter: str | None = None
+    quarterCompression: Dict[str, Any] = Field(default_factory=dict)
     rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -76,6 +77,10 @@ def target_filter_label(value: Any) -> str:
     if normalized == "quality":
         return "Qualitätsziel"
     return "Alle"
+
+
+def is_quarter_compression_enabled(value: Any) -> bool:
+    return isinstance(value, dict) and value.get("enabled") is True
 
 
 def parse_year_month(month_key: str) -> Tuple[int, int] | None:
@@ -164,6 +169,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     fragebogen_list: List[Dict[str, str]] = payload.get("fragebogen", []) or []
     selected_chains: List[str] = payload.get("selectedChains", []) or []
     selected_target_filter = target_filter_label(payload.get("selectedTargetFilter"))
+    quarter_compression_enabled = is_quarter_compression_enabled(payload.get("quarterCompression"))
 
     question_label_by_id: Dict[str, str] = {
         str(q.get("id", "")): str(q.get("label", "") or q.get("id", ""))
@@ -208,12 +214,16 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         "ZielMatch",
         "WeekKey",
         "KW",
+        "Datum",
+        "Originaldatum",
+        "Datum angepasst",
     ]
     raw_sheet.write_row(0, 0, raw_headers, fmt_header)
 
     raw_rows = sorted(
         rows,
         key=lambda item: (
+            str(item.get("dateKey", "")),
             str(item.get("monthKey", "")),
             str(item.get("chain", "")),
             str(item.get("questionLabel", "")),
@@ -225,9 +235,12 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     for row in raw_rows:
         month_key = str(row.get("monthKey", "")).strip()
         month_label = str(row.get("monthLabel", "")).strip() or month_key
-        quarter_key, quarter_label = derive_quarter(month_key, month_label)
+        quarter_key = str(row.get("quarterKey", "")).strip()
+        quarter_label = str(row.get("quarterLabel", "")).strip()
+        if not quarter_key:
+            quarter_key, quarter_label = derive_quarter(month_key, month_label)
         row["quarterKey"] = quarter_key
-        row["quarterLabel"] = quarter_label
+        row["quarterLabel"] = quarter_label or quarter_key
 
     for idx, row in enumerate(raw_rows, start=1):
         raw_sheet.write_row(
@@ -253,6 +266,9 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
                 "",
                 str(row.get("weekKey", "")),
                 str(row.get("weekLabel", "")),
+                str(row.get("dateLabel", "")) or str(row.get("dateKey", "")),
+                str(row.get("originalDateLabel", "")) or str(row.get("originalDateKey", "")),
+                1 if bool(row.get("dateWasCompressed", False)) else 0,
             ],
         )
         excel_row = idx + 1
@@ -296,16 +312,35 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_sheet.set_column(12, 12, 24)
     raw_sheet.set_column(13, 13, 40)
     raw_sheet.set_column(14, 18, 18)
+    raw_sheet.set_column(19, 21, 16)
 
     months = unique_months(raw_rows)
     month_key_to_label = {key: label for key, label in months}
+    period_label_header = "Datum" if quarter_compression_enabled else "Monat"
+    period_key_field = "dateKey" if quarter_compression_enabled else "monthKey"
+    period_label_field = "dateLabel" if quarter_compression_enabled else "monthLabel"
+    periods: List[Tuple[str, str]] = []
+    period_label_by_key: Dict[str, str] = {}
+
+    for row in raw_rows:
+        period_key = str(row.get(period_key_field, "")).strip()
+        if not period_key:
+            period_key = str(row.get("monthKey", "")).strip()
+        if not period_key:
+            continue
+        period_label = str(row.get(period_label_field, "")).strip()
+        if not period_label:
+            period_label = month_key_to_label.get(period_key, period_key)
+        if period_key not in period_label_by_key:
+            period_label_by_key[period_key] = period_label
+            periods.append((period_key, period_label))
 
     item_month_agg: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
     customer_agg: Dict[Tuple[str, str, str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
     ad_agg: Dict[Tuple[str, str], Dict[str, int]] = defaultdict(lambda: {"yes": 0, "total": 0})
 
     for row in raw_rows:
-        month_key = str(row.get("monthKey", ""))
+        month_key = str(row.get(period_key_field, "")).strip() or str(row.get("monthKey", ""))
         qid = str(row.get("questionId", ""))
         chain = str(row.get("chain", ""))
         market_name = str(row.get("marketName", ""))
@@ -326,15 +361,15 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         ad_agg[ad_key]["yes"] += yes_flag
 
     item_sheet = workbook.add_worksheet("ItemDistribution_Monthly")
-    item_headers = ["Monat"] + [question_label_by_id.get(qid, qid) for qid in question_order] + ["Alle Items"]
+    item_headers = [period_label_header] + [question_label_by_id.get(qid, qid) for qid in question_order] + ["Alle Items"]
     item_sheet.write_row(0, 0, item_headers, fmt_header)
 
-    for row_index, (month_key, month_label) in enumerate(months, start=1):
-        values: List[Any] = [month_label]
+    for row_index, (period_key, period_label) in enumerate(periods, start=1):
+        values: List[Any] = [period_label]
         total_yes = 0
         total_count = 0
         for qid in question_order:
-            agg = item_month_agg.get((month_key, qid), {"yes": 0, "total": 0})
+            agg = item_month_agg.get((period_key, qid), {"yes": 0, "total": 0})
             yes = agg["yes"]
             total = agg["total"]
             total_yes += yes
@@ -347,15 +382,15 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     item_sheet.set_column(1, max(1, len(item_headers) - 1), 24, fmt_percent)
 
     customer_sheet = workbook.add_worksheet("CustomerDistribution_Monthly")
-    customer_sheet.write_row(0, 0, ["Monat", "Handelskette", "Interne Markt ID", "Kunde", "Ja", "Gesamt", "Distribution"], fmt_header)
+    customer_sheet.write_row(0, 0, [period_label_header, "Handelskette", "Interne Markt ID", "Kunde", "Ja", "Gesamt", "Distribution"], fmt_header)
     for row_index, (key, agg) in enumerate(sorted(customer_agg.items()), start=1):
-        month_key, chain, market_internal_id, market_name = key
+        period_key, chain, market_internal_id, market_name = key
         total = agg["total"]
         yes = agg["yes"]
         customer_sheet.write_row(
             row_index,
             0,
-            [month_key_to_label.get(month_key, month_key), chain, market_internal_id, market_name, yes, total, (yes / total) if total > 0 else 0],
+            [period_label_by_key.get(period_key, period_key), chain, market_internal_id, market_name, yes, total, (yes / total) if total > 0 else 0],
         )
     customer_sheet.set_column(0, 1, 22)
     customer_sheet.set_column(2, 2, 18)
@@ -364,15 +399,15 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     customer_sheet.set_column(6, 6, 14, fmt_percent)
 
     ad_sheet = workbook.add_worksheet("ADDistribution_Monthly")
-    ad_sheet.write_row(0, 0, ["Monat", "AD-Mitarbeiter", "Ja", "Gesamt", "Distribution"], fmt_header)
+    ad_sheet.write_row(0, 0, [period_label_header, "AD-Mitarbeiter", "Ja", "Gesamt", "Distribution"], fmt_header)
     for row_index, (key, agg) in enumerate(sorted(ad_agg.items()), start=1):
-        month_key, gl_name = key
+        period_key, gl_name = key
         total = agg["total"]
         yes = agg["yes"]
         ad_sheet.write_row(
             row_index,
             0,
-            [month_key_to_label.get(month_key, month_key), gl_name, yes, total, (yes / total) if total > 0 else 0],
+            [period_label_by_key.get(period_key, period_key), gl_name, yes, total, (yes / total) if total > 0 else 0],
         )
     ad_sheet.set_column(0, 1, 22)
     ad_sheet.set_column(2, 3, 10)
