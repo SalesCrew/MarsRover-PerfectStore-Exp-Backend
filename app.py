@@ -2,8 +2,10 @@ from io import BytesIO
 from typing import Any, Dict, List, Tuple
 from collections import OrderedDict, defaultdict
 import logging
+import re
 import sys
 import time
+import unicodedata
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import Response
@@ -55,6 +57,7 @@ class ExportPayload(BaseModel):
     selectedQuestions: List[Dict[str, Any]] = Field(default_factory=list)
     selectedTargetFilter: str | None = None
     quarterCompression: Dict[str, Any] = Field(default_factory=dict)
+    historicalAnalysis: bool = False
     rows: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -162,6 +165,25 @@ def unique_weeks(rows: List[Dict[str, Any]]) -> List[Tuple[str, str]]:
     return sorted(week_map.items(), key=lambda item: week_sort_key(item[0]))
 
 
+def normalize_question_label(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return re.sub(r"[\W_]+", " ", normalized, flags=re.UNICODE).strip()
+
+
+def question_analysis_parts(row: Dict[str, Any], historical_analysis: bool) -> Tuple[str, str]:
+    source_id = str(row.get("questionId", "")).strip()
+    source_label = str(row.get("questionLabel", "")).strip() or source_id
+    if not historical_analysis:
+        return source_id, source_label
+
+    analysis_label = str(row.get("analysisQuestionLabel", "")).strip() or source_label
+    analysis_key = str(row.get("analysisQuestionKey", "")).strip()
+    if not analysis_key:
+        normalized_label = normalize_question_label(analysis_label)
+        analysis_key = f"yesno:{normalized_label}" if normalized_label else source_id
+    return analysis_key, analysis_label
+
+
 def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     output = BytesIO()
     rows: List[Dict[str, Any]] = payload.get("rows", []) or []
@@ -170,6 +192,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     selected_chains: List[str] = payload.get("selectedChains", []) or []
     selected_target_filter = target_filter_label(payload.get("selectedTargetFilter"))
     quarter_compression_enabled = is_quarter_compression_enabled(payload.get("quarterCompression"))
+    historical_analysis = payload.get("historicalAnalysis") is True
 
     question_label_by_id: Dict[str, str] = {
         str(q.get("id", "")): str(q.get("label", "") or q.get("id", ""))
@@ -179,11 +202,14 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     question_order: List[str] = [str(q.get("id", "")) for q in selected_questions if q.get("id")]
 
     for row in rows:
-        qid = str(row.get("questionId", "")).strip()
-        qlabel = str(row.get("questionLabel", "")).strip()
+        qid, qlabel = question_analysis_parts(row, historical_analysis)
         if qid and qid not in question_label_by_id:
             question_label_by_id[qid] = qlabel or qid
             question_order.append(qid)
+
+    def canonical_question_label(row: Dict[str, Any]) -> str:
+        question_key, fallback_label = question_analysis_parts(row, historical_analysis)
+        return question_label_by_id.get(question_key, fallback_label)
 
     workbook = xlsxwriter.Workbook(output, {"in_memory": True})
 
@@ -218,6 +244,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         "Originaldatum",
         "Datum angepasst",
     ]
+    if historical_analysis:
+        raw_headers.append("Historische Frage")
     raw_sheet.write_row(0, 0, raw_headers, fmt_header)
 
     raw_rows = sorted(
@@ -226,7 +254,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             str(item.get("dateKey", "")),
             str(item.get("monthKey", "")),
             str(item.get("chain", "")),
-            str(item.get("questionLabel", "")),
+            canonical_question_label(item),
             str(item.get("marketName", "")),
             str(item.get("marketInternalId", "")),
         ),
@@ -243,33 +271,37 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         row["quarterLabel"] = quarter_label or quarter_key
 
     for idx, row in enumerate(raw_rows, start=1):
+        raw_values = [
+            str(row.get("monthKey", "")),
+            str(row.get("monthLabel", "")),
+            str(row.get("quarterKey", "")),
+            str(row.get("quarterLabel", "")),
+            str(row.get("fragebogenName", "")),
+            str(row.get("questionId", "")),
+            str(row.get("questionLabel", "")),
+            1 if bool(row.get("answerBoolean", False)) else 0,
+            "Ja" if bool(row.get("answerBoolean", False)) else "Nein",
+            str(row.get("marketName", "")),
+            str(row.get("marketInternalId", "")),
+            str(row.get("chain", "")),
+            str(row.get("glName", "")),
+            str(row.get("responseId", "")),
+            1 if bool(row.get("distributionsziel", False)) else 0,
+            1 if bool(row.get("qualitaetsziel", False)) else 0,
+            "",
+            str(row.get("weekKey", "")),
+            str(row.get("weekLabel", "")),
+            str(row.get("dateLabel", "")) or str(row.get("dateKey", "")),
+            str(row.get("originalDateLabel", "")) or str(row.get("originalDateKey", "")),
+            1 if bool(row.get("dateWasCompressed", False)) else 0,
+        ]
+        if historical_analysis:
+            raw_values.append(canonical_question_label(row))
+
         raw_sheet.write_row(
             idx,
             0,
-            [
-                str(row.get("monthKey", "")),
-                str(row.get("monthLabel", "")),
-                str(row.get("quarterKey", "")),
-                str(row.get("quarterLabel", "")),
-                str(row.get("fragebogenName", "")),
-                str(row.get("questionId", "")),
-                str(row.get("questionLabel", "")),
-                1 if bool(row.get("answerBoolean", False)) else 0,
-                "Ja" if bool(row.get("answerBoolean", False)) else "Nein",
-                str(row.get("marketName", "")),
-                str(row.get("marketInternalId", "")),
-                str(row.get("chain", "")),
-                str(row.get("glName", "")),
-                str(row.get("responseId", "")),
-                1 if bool(row.get("distributionsziel", False)) else 0,
-                1 if bool(row.get("qualitaetsziel", False)) else 0,
-                "",
-                str(row.get("weekKey", "")),
-                str(row.get("weekLabel", "")),
-                str(row.get("dateLabel", "")) or str(row.get("dateKey", "")),
-                str(row.get("originalDateLabel", "")) or str(row.get("originalDateKey", "")),
-                1 if bool(row.get("dateWasCompressed", False)) else 0,
-            ],
+            raw_values,
         )
         excel_row = idx + 1
         raw_sheet.write_formula(
@@ -313,6 +345,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     raw_sheet.set_column(13, 13, 40)
     raw_sheet.set_column(14, 18, 18)
     raw_sheet.set_column(19, 21, 16)
+    if historical_analysis:
+        raw_sheet.set_column(22, 22, 45)
 
     months = unique_months(raw_rows)
     month_key_to_label = {key: label for key, label in months}
@@ -341,7 +375,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
 
     for row in raw_rows:
         month_key = str(row.get(period_key_field, "")).strip() or str(row.get("monthKey", ""))
-        qid = str(row.get("questionId", ""))
+        qid, _ = question_analysis_parts(row, historical_analysis)
         chain = str(row.get("chain", ""))
         market_name = str(row.get("marketName", ""))
         market_internal_id = str(row.get("marketInternalId", ""))
@@ -423,6 +457,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     question_options = ["Alle"] + questions_from_rows
     gl_options = ["Alle"] + gl_from_rows
     timeframe_options = ["Quartal", "KW"]
+    if historical_analysis:
+        timeframe_options.insert(1, "Monat")
     target_options = ["Alle", "Distributionsziel", "Qualitätsziel"]
     for idx, value in enumerate(chain_options):
         list_sheet.write(idx, 0, value)
@@ -462,8 +498,11 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
     chart_data.write_row(0, 6, ["WeekKey", "KW", "Ja", "Gesamt", "Distribution"], fmt_header)
     chart_data.write_row(0, 12, ["Zeitraum", "Distribution"], fmt_header)
+    if historical_analysis:
+        chart_data.write_row(0, 15, ["MonthKey", "Monat", "Ja", "Gesamt", "Distribution"], fmt_header)
 
     quarters = unique_quarters(raw_rows)
+    question_filter_column = "$W:$W" if historical_analysis else "$G:$G"
     for row_index, (quarter_key, quarter_label) in enumerate(quarters, start=1):
         excel_row = row_index + 1
         chart_data.write(row_index, 0, quarter_key)
@@ -474,7 +513,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             (
                 f'=SUMIFS(RawData!$H:$H,RawData!$C:$C,$A{excel_row},'
                 f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
-                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
                 f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
                 f'RawData!$Q:$Q,1)'
             ),
@@ -485,7 +524,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             (
                 f'=COUNTIFS(RawData!$C:$C,$A{excel_row},'
                 f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
-                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
                 f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
                 f'RawData!$Q:$Q,1)'
             ),
@@ -503,7 +542,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             (
                 f'=SUMIFS(RawData!$H:$H,RawData!$R:$R,$G{excel_row},'
                 f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
-                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
                 f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
                 f'RawData!$Q:$Q,1)'
             ),
@@ -514,36 +553,85 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
             (
                 f'=COUNTIFS(RawData!$R:$R,$G{excel_row},'
                 f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
-                f'RawData!$G:$G,IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
                 f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
                 f'RawData!$Q:$Q,1)'
             ),
         )
         chart_data.write_formula(row_index, 10, f'=IF(J{excel_row}=0,0,I{excel_row}/J{excel_row})', fmt_percent)
 
+    if historical_analysis:
+        for row_index, (month_key, month_label) in enumerate(months, start=1):
+            excel_row = row_index + 1
+            chart_data.write(row_index, 15, month_key)
+            chart_data.write(row_index, 16, month_label)
+            chart_data.write_formula(
+                row_index,
+                17,
+                (
+                    f'=SUMIFS(RawData!$H:$H,RawData!$A:$A,$P{excel_row},'
+                    f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                    f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                    f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                    f'RawData!$Q:$Q,1)'
+                ),
+            )
+            chart_data.write_formula(
+                row_index,
+                18,
+                (
+                    f'=COUNTIFS(RawData!$A:$A,$P{excel_row},'
+                    f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                    f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                    f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                    f'RawData!$Q:$Q,1)'
+                ),
+            )
+            chart_data.write_formula(row_index, 19, f'=IF(S{excel_row}=0,0,R{excel_row}/S{excel_row})', fmt_percent)
+
     quarter_last_row = max(len(quarters) + 1, 2)
     week_last_row = max(len(weeks) + 1, 2)
-    max_periods = max(len(quarters), len(weeks))
+    month_last_row = max(len(months) + 1, 2)
+    max_periods = max(len(quarters), len(weeks), len(months) if historical_analysis else 0)
 
     for row_index in range(1, max_periods + 1):
         excel_row = row_index + 1
-        chart_data.write_formula(
-            row_index,
-            12,
-            (
+        if historical_analysis:
+            category_formula = (
+                f'=IF(Chart!$B$7="KW",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($H$2:$H${week_last_row},ROW()-1),""),'
+                f'IF(Chart!$B$7="Monat",'
+                f'IF(ROW()-1<=COUNTA($P$2:$P${month_last_row}),INDEX($Q$2:$Q${month_last_row},ROW()-1),""),'
+                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),"")))'
+            )
+            value_formula = (
+                f'=IF(Chart!$B$7="KW",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
+                f'IF(Chart!$B$7="Monat",'
+                f'IF(ROW()-1<=COUNTA($P$2:$P${month_last_row}),INDEX($T$2:$T${month_last_row},ROW()-1),NA()),'
+                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA())))'
+            )
+        else:
+            category_formula = (
                 f'=IF(Chart!$B$7="KW",'
                 f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($H$2:$H${week_last_row},ROW()-1),""),'
                 f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),""))'
-            ),
+            )
+            value_formula = (
+                f'=IF(Chart!$B$7="KW",'
+                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
+                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA()))'
+            )
+
+        chart_data.write_formula(
+            row_index,
+            12,
+            category_formula,
         )
         chart_data.write_formula(
             row_index,
             13,
-            (
-                f'=IF(Chart!$B$7="KW",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
-                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA()))'
-            ),
+            value_formula,
             fmt_percent,
         )
 
@@ -555,6 +643,10 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chart_data.set_column(10, 10, 14, fmt_percent)
     chart_data.set_column(12, 12, 14)
     chart_data.set_column(13, 13, 14, fmt_percent)
+    if historical_analysis:
+        chart_data.set_column(15, 16, 12)
+        chart_data.set_column(17, 18, 10)
+        chart_data.set_column(19, 19, 14, fmt_percent)
 
     if max_periods > 0:
         line_chart = workbook.add_chart({"type": "line"})

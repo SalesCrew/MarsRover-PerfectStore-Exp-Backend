@@ -20,7 +20,8 @@ The `POST /distribution-export.xlsx` endpoint accepts the normalized export payl
 
 The generated workbook keeps monthly columns in `RawData` for detail analysis and uses a quarterly timeline in the `Chart` sheet.
 The GL filter is handled inside Excel (`Chart!B5`) and filters chart values per AD-Mitarbeiter directly from raw answer rows.
-The timeframe can be switched directly in Excel via `Chart!B6` between `Quartal` and `Monat`.
+For exports containing multiple Fragebögen, copied Ja/Nein questions are grouped by normalized wording while their original IDs remain visible in `RawData`.
+The timeframe can be switched directly in Excel via `Chart!B7`; historical multi-Fragebogen exports support `Monat`, `Quartal`, and `KW`.
 
 ## Deployment
 
