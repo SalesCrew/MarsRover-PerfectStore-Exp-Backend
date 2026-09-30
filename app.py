@@ -57,6 +57,8 @@ class ExportPayload(BaseModel):
     selectedQuestions: List[Dict[str, Any]] = Field(default_factory=list)
     selectedTargetFilter: str | None = None
     quarterCompression: Dict[str, Any] = Field(default_factory=dict)
+    dateRange: Dict[str, Any] = Field(default_factory=dict)
+    quarterBasis: str | None = None
     historicalAnalysis: bool = False
     rows: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -472,6 +474,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         list_sheet.write(idx, 4, value)
 
     dashboard = workbook.add_worksheet("Chart")
+    dashboard.set_column(0, 0, 24)
+    dashboard.set_column(1, 1, 32)
     dashboard.write("A1", "Fragebogen Distribution (Ja/Nein)", fmt_title)
     dashboard.write("A2", "Frageboegen: " + ", ".join([str(fb.get("name", "")) for fb in fragebogen_list if fb.get("name")]))
     dashboard.write("A3", "Handelskette Filter:", fmt_label)
@@ -493,6 +497,16 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     dashboard.write("A9", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
     if selected_chains:
         dashboard.write("A10", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
+    date_range = payload.get("dateRange") or {}
+    def date_label(value: Any) -> str:
+        parts = str(value or "").split("-")
+        return ".".join(reversed(parts)) if len(parts) == 3 else ""
+    if date_range.get("startDate") or date_range.get("endDate"):
+        start_label = date_label(date_range.get("startDate")) or "Beginn"
+        end_label = date_label(date_range.get("endDate")) or "Ende"
+        dashboard.write("A11", f"Antwortdatum: {start_label} bis {end_label} (inklusive, Europe/Vienna)", fmt_note)
+    if payload.get("quarterBasis") == "questionnaire" and not quarter_compression_enabled:
+        dashboard.write("A12", "Quartale: Perfect-Store-Fragebogen. Monat/KW: tatsächliches Antwortdatum.", fmt_note)
 
     chart_data = workbook.add_worksheet("ChartData")
     chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
@@ -661,9 +675,9 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         )
         line_chart.set_title({"name": "Distribution pro Zeitraum"})
         line_chart.set_x_axis({"name": "Zeitraum"})
-        line_chart.set_y_axis({"name": "Distribution", "num_format": "0%"})
+        line_chart.set_y_axis({"name": "Distribution", "num_format": "0.0%", "major_unit": 0.01})
         line_chart.set_legend({"none": True})
-        dashboard.insert_chart("A12", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
+        dashboard.insert_chart("A14", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
 
     workbook.close()
     output.seek(0)
