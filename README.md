@@ -18,17 +18,21 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 
 The `POST /distribution-export.xlsx` endpoint accepts the normalized export payload built in the main backend and returns raw `.xlsx` bytes.
 
-The generated workbook keeps monthly columns in `RawData` for detail analysis and uses a quarterly timeline in the `Chart` sheet.
+The generated workbook keeps monthly columns in `RawData` for detail analysis.
 The GL filter is handled inside Excel (`Chart!B5`) and filters chart values per AD-Mitarbeiter directly from raw answer rows.
 For exports containing multiple Fragebögen, copied Ja/Nein questions are grouped by normalized wording while their original IDs remain visible in `RawData`.
-The timeframe can be switched directly in Excel via `Chart!B7`; historical multi-Fragebogen exports support `Monat`, `Quartal`, and `KW`.
+The timeframe can be switched directly in Excel via `Chart!B7`; all exports support
+`Monat`, `Quartal`, and `KW`, including single-Fragebogen exports. A date-filtered
+export containing one reporting quarter starts with `KW` when weekly data is
+available. Other exports, including quarter-compressed exports, start with `Quartal`.
 
 The app can prefilter by an optional beginning/end date. The main backend filters the
 original completion date in `Europe/Vienna`, including both boundary days, before
 applying any quarter compression. The selected range is shown in the `Chart` sheet.
 Perfect Store reporting quarters follow the questionnaire's quarter (including
 extensions such as Q2 until July 10); month/week views retain the actual response date.
-The chart's percentage axis uses one decimal and one-percentage-point tick intervals.
+The chart's percentage axis uses one decimal, a fixed 0–100% range, and
+ten-percentage-point tick intervals.
 
 ## Deployment
 

@@ -351,6 +351,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         raw_sheet.set_column(22, 22, 45)
 
     months = unique_months(raw_rows)
+    quarters = unique_quarters(raw_rows)
+    weeks = unique_weeks(raw_rows)
     month_key_to_label = {key: label for key, label in months}
     period_label_header = "Datum" if quarter_compression_enabled else "Monat"
     period_key_field = "dateKey" if quarter_compression_enabled else "monthKey"
@@ -458,9 +460,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chain_options = ["Alle"] + chains_from_rows
     question_options = ["Alle"] + questions_from_rows
     gl_options = ["Alle"] + gl_from_rows
-    timeframe_options = ["Quartal", "KW"]
-    if historical_analysis:
-        timeframe_options.insert(1, "Monat")
+    timeframe_options = ["Quartal", "Monat", "KW"]
     target_options = ["Alle", "Distributionsziel", "Qualitätsziel"]
     for idx, value in enumerate(chain_options):
         list_sheet.write(idx, 0, value)
@@ -473,6 +473,12 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     for idx, value in enumerate(target_options):
         list_sheet.write(idx, 4, value)
 
+    date_range = payload.get("dateRange") or {}
+    has_date_filter = bool(date_range.get("startDate") or date_range.get("endDate"))
+    default_timeframe = (
+        "KW" if has_date_filter and len(quarters) == 1 and weeks
+        and not quarter_compression_enabled else "Quartal"
+    )
     dashboard = workbook.add_worksheet("Chart")
     dashboard.set_column(0, 0, 24)
     dashboard.set_column(1, 1, 32)
@@ -487,7 +493,7 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     dashboard.write("B4", "Alle")
     dashboard.write("B5", "Alle")
     dashboard.write("B6", selected_target_filter)
-    dashboard.write("B7", "Quartal")
+    dashboard.write("B7", default_timeframe)
     dashboard.data_validation("B3", {"validate": "list", "source": f"=Lists!$A$1:$A${len(chain_options)}"})
     dashboard.data_validation("B4", {"validate": "list", "source": f"=Lists!$B$1:$B${len(question_options)}"})
     dashboard.data_validation("B5", {"validate": "list", "source": f"=Lists!$C$1:$C${len(gl_options)}"})
@@ -497,7 +503,6 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     dashboard.write("A9", "RawData enthaelt zusaetzlich native Tabellenfilter pro Spalte.", fmt_note)
     if selected_chains:
         dashboard.write("A10", "Vorfilter Chains aus App: " + ", ".join(selected_chains), fmt_note)
-    date_range = payload.get("dateRange") or {}
     def date_label(value: Any) -> str:
         parts = str(value or "").split("-")
         return ".".join(reversed(parts)) if len(parts) == 3 else ""
@@ -512,10 +517,8 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chart_data.write_row(0, 0, ["QuarterKey", "Quartal", "Ja", "Gesamt", "Distribution"], fmt_header)
     chart_data.write_row(0, 6, ["WeekKey", "KW", "Ja", "Gesamt", "Distribution"], fmt_header)
     chart_data.write_row(0, 12, ["Zeitraum", "Distribution"], fmt_header)
-    if historical_analysis:
-        chart_data.write_row(0, 15, ["MonthKey", "Monat", "Ja", "Gesamt", "Distribution"], fmt_header)
+    chart_data.write_row(0, 15, ["MonthKey", "Monat", "Ja", "Gesamt", "Distribution"], fmt_header)
 
-    quarters = unique_quarters(raw_rows)
     question_filter_column = "$W:$W" if historical_analysis else "$G:$G"
     for row_index, (quarter_key, quarter_label) in enumerate(quarters, start=1):
         excel_row = row_index + 1
@@ -545,7 +548,6 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         )
         chart_data.write_formula(row_index, 4, f'=IF(D{excel_row}=0,0,C{excel_row}/D{excel_row})', fmt_percent)
 
-    weeks = unique_weeks(raw_rows)
     for row_index, (week_key, week_label) in enumerate(weeks, start=1):
         excel_row = row_index + 1
         chart_data.write(row_index, 6, week_key)
@@ -574,68 +576,55 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         )
         chart_data.write_formula(row_index, 10, f'=IF(J{excel_row}=0,0,I{excel_row}/J{excel_row})', fmt_percent)
 
-    if historical_analysis:
-        for row_index, (month_key, month_label) in enumerate(months, start=1):
-            excel_row = row_index + 1
-            chart_data.write(row_index, 15, month_key)
-            chart_data.write(row_index, 16, month_label)
-            chart_data.write_formula(
-                row_index,
-                17,
-                (
-                    f'=SUMIFS(RawData!$H:$H,RawData!$A:$A,$P{excel_row},'
-                    f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
-                    f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                    f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
-                    f'RawData!$Q:$Q,1)'
-                ),
-            )
-            chart_data.write_formula(
-                row_index,
-                18,
-                (
-                    f'=COUNTIFS(RawData!$A:$A,$P{excel_row},'
-                    f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
-                    f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
-                    f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
-                    f'RawData!$Q:$Q,1)'
-                ),
-            )
-            chart_data.write_formula(row_index, 19, f'=IF(S{excel_row}=0,0,R{excel_row}/S{excel_row})', fmt_percent)
+    for row_index, (month_key, month_label) in enumerate(months, start=1):
+        excel_row = row_index + 1
+        chart_data.write(row_index, 15, month_key)
+        chart_data.write(row_index, 16, month_label)
+        chart_data.write_formula(
+            row_index,
+            17,
+            (
+                f'=SUMIFS(RawData!$H:$H,RawData!$A:$A,$P{excel_row},'
+                f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$Q:$Q,1)'
+            ),
+        )
+        chart_data.write_formula(
+            row_index,
+            18,
+            (
+                f'=COUNTIFS(RawData!$A:$A,$P{excel_row},'
+                f'RawData!$L:$L,IF(Chart!$B$3="Alle","*",Chart!$B$3),'
+                f'RawData!{question_filter_column},IF(Chart!$B$4="Alle","*",Chart!$B$4),'
+                f'RawData!$M:$M,IF(Chart!$B$5="Alle","*",Chart!$B$5),'
+                f'RawData!$Q:$Q,1)'
+            ),
+        )
+        chart_data.write_formula(row_index, 19, f'=IF(S{excel_row}=0,0,R{excel_row}/S{excel_row})', fmt_percent)
 
     quarter_last_row = max(len(quarters) + 1, 2)
     week_last_row = max(len(weeks) + 1, 2)
     month_last_row = max(len(months) + 1, 2)
-    max_periods = max(len(quarters), len(weeks), len(months) if historical_analysis else 0)
+    max_periods = max(len(quarters), len(weeks), len(months))
 
     for row_index in range(1, max_periods + 1):
         excel_row = row_index + 1
-        if historical_analysis:
-            category_formula = (
-                f'=IF(Chart!$B$7="KW",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($H$2:$H${week_last_row},ROW()-1),""),'
-                f'IF(Chart!$B$7="Monat",'
-                f'IF(ROW()-1<=COUNTA($P$2:$P${month_last_row}),INDEX($Q$2:$Q${month_last_row},ROW()-1),""),'
-                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),"")))'
-            )
-            value_formula = (
-                f'=IF(Chart!$B$7="KW",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
-                f'IF(Chart!$B$7="Monat",'
-                f'IF(ROW()-1<=COUNTA($P$2:$P${month_last_row}),INDEX($T$2:$T${month_last_row},ROW()-1),NA()),'
-                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA())))'
-            )
-        else:
-            category_formula = (
-                f'=IF(Chart!$B$7="KW",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($H$2:$H${week_last_row},ROW()-1),""),'
-                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),""))'
-            )
-            value_formula = (
-                f'=IF(Chart!$B$7="KW",'
-                f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
-                f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA()))'
-            )
+        category_formula = (
+            f'=IF(Chart!$B$7="KW",'
+            f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($H$2:$H${week_last_row},ROW()-1),""),'
+            f'IF(Chart!$B$7="Monat",'
+            f'IF(ROW()-1<=COUNTA($P$2:$P${month_last_row}),INDEX($Q$2:$Q${month_last_row},ROW()-1),""),'
+            f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($B$2:$B${quarter_last_row},ROW()-1),"")))'
+        )
+        value_formula = (
+            f'=IF(Chart!$B$7="KW",'
+            f'IF(ROW()-1<=COUNTA($G$2:$G${week_last_row}),INDEX($K$2:$K${week_last_row},ROW()-1),NA()),'
+            f'IF(Chart!$B$7="Monat",'
+            f'IF(ROW()-1<=COUNTA($P$2:$P${month_last_row}),INDEX($T$2:$T${month_last_row},ROW()-1),NA()),'
+            f'IF(ROW()-1<=COUNTA($A$2:$A${quarter_last_row}),INDEX($E$2:$E${quarter_last_row},ROW()-1),NA())))'
+        )
 
         chart_data.write_formula(
             row_index,
@@ -657,10 +646,9 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
     chart_data.set_column(10, 10, 14, fmt_percent)
     chart_data.set_column(12, 12, 14)
     chart_data.set_column(13, 13, 14, fmt_percent)
-    if historical_analysis:
-        chart_data.set_column(15, 16, 12)
-        chart_data.set_column(17, 18, 10)
-        chart_data.set_column(19, 19, 14, fmt_percent)
+    chart_data.set_column(15, 16, 12)
+    chart_data.set_column(17, 18, 10)
+    chart_data.set_column(19, 19, 14, fmt_percent)
 
     if max_periods > 0:
         line_chart = workbook.add_chart({"type": "line"})
@@ -675,7 +663,10 @@ def build_workbook_bytes(payload: Dict[str, Any]) -> bytes:
         )
         line_chart.set_title({"name": "Distribution pro Zeitraum"})
         line_chart.set_x_axis({"name": "Zeitraum"})
-        line_chart.set_y_axis({"name": "Distribution", "num_format": "0.0%", "major_unit": 0.01})
+        line_chart.set_y_axis({
+            "name": "Distribution", "num_format": "0.0%",
+            "min": 0, "max": 1, "major_unit": 0.1,
+        })
         line_chart.set_legend({"none": True})
         dashboard.insert_chart("A14", line_chart, {"x_scale": 1.5, "y_scale": 1.4})
 
